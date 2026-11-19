@@ -1,0 +1,13 @@
+schema_version = "1.0.0"
+id = "firewood_shelf_filler"
+version = "1.3.0"
+name = "Firewood Shelf Filler"
+tagline = "Physically stack small irregular firewood logs inside a shelf"
+maintainer = "OpenAI"
+type = "add-on"
+tags = ["Object"]
+blender_version_min = "4.2.0"
+license = ["SPDX:GPL-3.0-or-later"]
+
+[build]
+paths_exclude_pattern = ["/.git/", "/tests/", "__pycache__/"]

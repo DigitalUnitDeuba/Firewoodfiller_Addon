@@ -1,4 +1,4 @@
-Firewood Shelf Filler 1.3.3
+Firewood Shelf Filler 1.3.4
 ==========================
 Blender-Erweiterung für statische Holzstapel mit Produktbild- und Physikmodus.
 Der Paket-Mindeststand ist Blender 4.2. Der Viewport wurde unter Blender
@@ -25,7 +25,9 @@ Holzstapel erzeugen
    frei fallen und sich setzen.
 5. „Füllhöhe im Viewport einstellen“ öffnen. Den türkisfarbenen Griff direkt
    am Stapel ziehen. Beim Ziehen erscheinen oder verschwinden Holzscheite,
-   und die markierte Fläche zeigt die neue Füllgrenze.
+   und die markierte Fläche zeigt die neue Füllgrenze. Über die Regaloberkante
+   hinausziehen, um höher als 100 % zu stapeln. Im Feld „Füllhöhe“ entspricht
+   beispielsweise 1,35 einer Füllhöhe von 135 %.
 6. Mit dem Häkchen am Griff oder Enter übernehmen. Bei „Produktbild“ wird
    die gezeigte Anordnung übernommen, im Physikmodus folgt die Simulation.
    Esc verwirft die Vorschau und stellt den bisherigen Stapel wieder her.

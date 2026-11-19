@@ -20,7 +20,7 @@ def event(kind, value, point):
 
 def on_rail(height):
     bottom, top, w0, w1, _ = get_editor().rail
-    return bottom.lerp(top, height * w1 / ((1 - height) * w0 + height * w1))
+    return bottom.lerp(top, addon["rail_fraction"](height, w0, w1))
 
 def assert_preview_geometry(editor):
     tree = editor.preview_tree
@@ -100,16 +100,17 @@ def tick():
             assert editor.preview.as_pointer() == preview_id
             assert editor.dragging and settings.fill_height == 1.0
             assert_preview_geometry(editor)
-            event('MOUSEMOVE', 'NOTHING', on_rail(0.83))
+            event('MOUSEMOVE', 'NOTHING', on_rail(1.35))
         elif stage == 3:
             editor = get_editor()
-            assert half_count < editor.count <= full_count
+            assert abs(editor.height - 1.35) < 0.015, editor.height
+            assert editor.count > full_count
             assert editor.preview.as_pointer() == preview_id
-            event('MOUSEMOVE', 'NOTHING', on_rail(0.50))
-            event('LEFTMOUSE', 'RELEASE', on_rail(0.50))
+            assert_preview_geometry(editor)
+            event('LEFTMOUSE', 'RELEASE', on_rail(1.35))
         elif stage == 4:
             editor = get_editor()
-            assert editor.count == half_count
+            assert editor.count > full_count
             _, _, _, _, (x1, y1, x2, y2) = editor.rail
             button = Vector(((x1 + x2) / 2, (y1 + y2) / 2))
             event('MOUSEMOVE', 'NOTHING', button)
@@ -117,10 +118,10 @@ def tick():
             event('LEFTMOUSE', 'RELEASE', button)
         elif stage == 5:
             assert not editor_type.sessions
-            assert abs(settings.fill_height - 0.50) < 0.015
+            assert abs(settings.fill_height - 1.35) < 0.015
             assert bpy.data.objects.get("Firewood Live-Vorschau") is None
             baked = addon["find_stack"](scene, settings.volume_object)
-            assert len(baked.objects) >= half_count * 0.97
+            assert len(baked.objects) > full_count
             assert all(obj.parent == settings.volume_object for obj in baked.objects)
             bpy.context.view_layer.update()
             assert all(abs((obj.matrix_world.to_3x3() @ Vector((0, 0, 0.5))).length - 0.28) < 0.00001
@@ -128,15 +129,15 @@ def tick():
             with bpy.context.temp_override(window=window, area=area, region=region):
                 assert bpy.ops.fw_shelf.adjust_height('INVOKE_DEFAULT') == {'RUNNING_MODAL'}
         elif stage == 6:
-            event('MOUSEMOVE', 'NOTHING', on_rail(0.5))
-            event('LEFTMOUSE', 'PRESS', on_rail(0.5))
+            event('MOUSEMOVE', 'NOTHING', on_rail(1.35))
+            event('LEFTMOUSE', 'PRESS', on_rail(1.35))
             event('MOUSEMOVE', 'NOTHING', on_rail(0.0))
         elif stage == 7:
             assert get_editor().count == 0
             event('ESC', 'PRESS', on_rail(0))
         elif stage == 8:
             assert not editor_type.sessions
-            assert abs(settings.fill_height - 0.50) < 0.015
+            assert abs(settings.fill_height - 1.35) < 0.015
             assert addon["find_stack"](scene, settings.volume_object) == baked
             layer = bpy.context.view_layer.layer_collection.children.get(baked.name)
             assert not layer.hide_viewport and bpy.data.objects.get("Firewood Live-Vorschau") is None

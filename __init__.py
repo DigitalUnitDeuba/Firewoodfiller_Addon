@@ -2,7 +2,7 @@
 bl_info = {
     "name": "Firewood Shelf Filler",
     "author": "OpenAI",
-    "version": (1, 3, 3),
+    "version": (1, 3, 4),
     "blender": (4, 2, 0),
     "location": "3D Viewport > N > Firewood",
     "description": "Kleinere Holzscheite physikalisch dicht stapeln und als statische Instanzen einfrieren",
@@ -431,7 +431,6 @@ def product_layout(dims, settings, setups):
     row = 0
     while True:
         row_start = len(result)
-        hit_ceiling = False
         edge = left + (settings.diameter * 0.38 if row % 2 else 0.0)
         while edge + narrowest.x_max - narrowest.x_min <= right:
             profile = rng.choice(profiles)
@@ -446,27 +445,25 @@ def product_layout(dims, settings, setups):
             supports = False
             nearby = {index for column in bins for index in columns.get(column, ())}
             for index in nearby:
-                old_x, old_z, old_profile, old_height = obstacles[index]
+                old_x, old_z, old_profile, old_height, old_row = obstacles[index]
                 contact = contact_height(profile.lower, old_profile.upper, old_x - x)
                 if contact is not None:
-                    supports = True
+                    supports |= old_row == row - 1
                     z = max(z, old_z + contact + gap)
                     required_height = max(required_height, old_height)
             if row and not supports:
                 continue
-            if z + profile.z_max > ceiling - gap:
-                hit_ceiling = True
-                continue
-            required_height = max(required_height, z + profile.z_max)
+            required_height = max(required_height, z + profile.z_max + gap)
             depth_room = dims.y - (profile.y_max - profile.y_min)
             front_margin = min(depth_room * 0.5, gap + rng.uniform(0.002, 0.009))
             y = -dims.y * 0.5 - profile.y_min + front_margin
             matrix = Matrix.Translation((x, y, z)) @ profile.rotation
-            result.append((required_height, profile.variant, matrix))
+            if required_height <= ceiling:
+                result.append((required_height, profile.variant, matrix))
             for column in bins:
                 columns.setdefault(column, []).append(len(obstacles))
-            obstacles.append((x, z, profile, required_height))
-        if hit_ceiling or len(result) == row_start:
+            obstacles.append((x, z, profile, required_height, row))
+        if len(result) == row_start:
             break
         row += 1
     return sorted(result, key=lambda placement: placement[0])
@@ -656,17 +653,15 @@ def main(context, settings, progress=None):
     context.view_layer.update()
     variants, frame, dims = check_input(scene, settings)
     setups = prepare_variants(variants, dims, settings)
+    frame, dims = fill_geometry(frame, dims, settings.fill_height)
     if settings.stack_mode == 'PRODUCT':
-        ceiling = dims.z * (settings.fill_height - 0.5)
         layout = product_layout(dims, settings, setups)
-        capacity = bisect_right(layout, ceiling, key=lambda placement: placement[0])
-        count = planned_count(settings, capacity)
+        count = planned_count(settings, len(layout))
         if not count:
             raise RuntimeError("Die Füllhöhe oder Regalbreite reicht für die eingestellte Scheit-Dicke nicht aus.")
         stack = [(frame @ matrix, setups[variant]) for _, variant, matrix in layout[:count]]
         return create_final(scene, settings.volume_object, stack), 0
 
-    frame, dims = fill_geometry(frame, dims, settings.fill_height)
     slots = create_slots(dims, settings)
     if not slots:
         raise RuntimeError("Die Füllhöhe oder Regalbreite reicht für die eingestellte Scheit-Dicke nicht aus.")
@@ -723,8 +718,8 @@ class FWShelfSettings(bpy.types.PropertyGroup):
         default=1.0, min=0.10, max=1.0, subtype='FACTOR',
     )
     fill_height: FloatProperty(
-        name="Füllhöhe", description="Obergrenze des Stapels, gemessen vom Boden des Innenraums",
-        default=1.0, min=0.0, max=1.0, subtype='FACTOR',
+        name="Füllhöhe", description="Höhe ab Regalboden. 1,0 entspricht der Regaloberkante",
+        default=1.0, min=0.0, subtype='FACTOR',
     )
     manual_count: IntProperty(
         name="Anzahl (0 = Auto)", description="0 = passend zur Regalbreite/-hoehe berechnen",
@@ -909,6 +904,19 @@ def create_preview_nodes(setups):
         raise
 
 
+def rail_fraction(height, w0, w1):
+    if height > 1.0:
+        return 1.0 + (height - 1.0) * w0 / w1
+    return height * w1 / ((1 - height) * w0 + height * w1)
+
+
+def rail_height(fraction, w0, w1):
+    # Continue past the shelf with the same slope at its top, even in perspective.
+    if fraction > 1.0:
+        return 1.0 + (fraction - 1.0) * w1 / w0
+    return fraction * w0 / ((1 - fraction) * w1 + fraction * w0)
+
+
 class FWSHELF_OT_adjust_height(bpy.types.Operator):
     bl_idname = "fw_shelf.adjust_height"
     bl_label = "Füllhöhe im Viewport einstellen"
@@ -1026,15 +1034,16 @@ class FWSHELF_OT_adjust_height(bpy.types.Operator):
     def cancel(self, context):
         self.close()
 
-    def build_preview(self):
+    def populate_preview_points(self, height):
+        frame, dims = fill_geometry(Matrix.Identity(4), self.dims, height)
         positions, variants, rotations, scales = [], [], [], []
         if self.settings.stack_mode == 'PRODUCT':
-            layout = product_layout(self.dims, self.settings, self.setups)
-            self.product_heights = [height for height, _, _ in layout]
-            poses = ((variant, matrix) for _, variant, matrix in layout)
+            layout = product_layout(dims, self.settings, self.setups)
+            self.product_heights = [threshold + frame.translation.z for threshold, _, _ in layout]
+            poses = ((variant, frame @ matrix) for _, variant, matrix in layout)
         else:
-            slots = create_slots(self.dims, self.settings)
-            poses = placements(Matrix.Identity(4), self.dims, slots, self.settings, len(self.setups))
+            slots = create_slots(dims, self.settings)
+            poses = placements(frame, dims, slots, self.settings, len(self.setups))
         for variant, matrix in poses:
             translation, rotation, scale = matrix.decompose()
             positions.append(translation)
@@ -1042,15 +1051,22 @@ class FWSHELF_OT_adjust_height(bpy.types.Operator):
             rotations.extend(rotation.to_euler())
             scales.extend(scale)
 
-        self.preview_mesh = bpy.data.meshes.new("Firewood Live-Punkte")
+        self.preview_mesh.clear_geometry()
         self.preview_mesh.from_pydata(positions, [], [])
         for name, data_type, field, values in (
             ("fw_variant", 'INT', "value", variants),
             ("fw_rotation", 'FLOAT_VECTOR', "vector", rotations),
             ("fw_scale", 'FLOAT_VECTOR', "vector", scales),
         ):
-            attribute = self.preview_mesh.attributes.new(name, data_type, 'POINT')
+            attribute = self.preview_mesh.attributes.get(name)
+            if attribute is None:
+                attribute = self.preview_mesh.attributes.new(name, data_type, 'POINT')
             attribute.data.foreach_set(field, values)
+        self.preview_capacity_height = height
+
+    def build_preview(self):
+        self.preview_mesh = bpy.data.meshes.new("Firewood Live-Punkte")
+        self.populate_preview_points(max(1.0, self.height))
         node_setups = []
         for source, transform in self.setups:
             if source.modifiers:
@@ -1071,6 +1087,9 @@ class FWSHELF_OT_adjust_height(bpy.types.Operator):
         modifier.node_group = self.preview_tree
 
     def update_preview(self):
+        if self.preview is not None and self.height > self.preview_capacity_height:
+            self.populate_preview_points(max(self.height, self.preview_capacity_height * 1.5))
+            self.preview.update_tag()
         if self.product_heights is not None:
             capacity = bisect_right(self.product_heights, self.dims.z * (self.height - 0.5))
         else:
@@ -1138,20 +1157,19 @@ class FWSHELF_OT_adjust_height(bpy.types.Operator):
         bottom, top, w0, w1, button = self.rail
         mouse = Vector((event.mouse_x - region.x, event.mouse_y - region.y))
         direction = top - bottom
-        t = min(1.0, max(0.0, (mouse - bottom).dot(direction) / direction.length_squared))
+        t = max(0.0, (mouse - bottom).dot(direction) / direction.length_squared)
         if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
             if button[0] <= mouse.x <= button[2] and button[1] <= mouse.y <= button[3]:
                 self.update_preview()
                 return self.apply_height()
-            if (mouse - bottom - t * direction).length <= 13 * self.ui_scale:
+            rail_end = max(1.0, rail_fraction(self.height, w0, w1))
+            if (mouse - bottom - min(t, rail_end) * direction).length <= 13 * self.ui_scale:
                 self.dragging = True
         if self.dragging and event.type in {'MOUSEMOVE', 'LEFTMOUSE'}:
             snap = 4 * self.ui_scale / direction.length
             if t < snap:
                 t = 0.0
-            elif t > 1.0 - snap:
-                t = 1.0
-            self.height = t * w0 / ((1 - t) * w1 + t * w0)
+            self.height = rail_height(t, w0, w1)
             if event.type == 'LEFTMOUSE' and event.value == 'RELEASE':
                 self.dragging = False
                 self.update_preview()
@@ -1196,7 +1214,7 @@ class FWSHELF_OT_adjust_height(bpy.types.Operator):
             self.rail = None
             return
         bottom, top, w0, w1 = projection
-        t = self.height * w1 / ((1 - self.height) * w0 + self.height * w1)
+        t = rail_fraction(self.height, w0, w1)
         knob = bottom.lerp(top, t)
         scale = self.ui_scale
         size = max(10, round(12 * scale))
@@ -1302,7 +1320,7 @@ class FWSHELF_PT_panel(bpy.types.Panel):
         row.enabled = props.manual_count == 0
         row.prop(props, "fill", slider=True)
         col.prop(props, "diameter")
-        col.prop(props, "fill_height", slider=True)
+        col.prop(props, "fill_height")
         col.operator("fw_shelf.adjust_height", icon='VIEW3D')
         vol = props.volume_object
         if props.stack_mode == 'PHYSICS' and vol is not None and vol.type == 'MESH':

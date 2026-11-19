@@ -2,7 +2,7 @@
 bl_info = {
     "name": "Firewood Shelf Filler",
     "author": "OpenAI",
-    "version": (1, 3, 1),
+    "version": (1, 3, 2),
     "blender": (4, 2, 0),
     "location": "3D Viewport > N > Firewood",
     "description": "Kleinere Holzscheite physikalisch dicht stapeln und als statische Instanzen einfrieren",
@@ -720,9 +720,10 @@ def create_preview_nodes(setups):
         selection = nodes.new('FunctionNodeCompare')
         selection.data_type = 'INT'
         selection.operation = 'LESS_THAN'
-        # Compare exposes separate sockets for each type; slots 2 and 3 are integers.
-        link(index.outputs[0], selection.inputs[2])
-        link(inputs.outputs["Scheite"], selection.inputs[3])
+        # Older releases also expose sockets for the inactive comparison types.
+        operands = {socket.name: socket for socket in selection.inputs if socket.enabled}
+        link(index.outputs[0], operands["A"])
+        link(inputs.outputs["Scheite"], operands["B"])
 
         instances = nodes.new('GeometryNodeInstanceOnPoints')
         link(inputs.outputs["Geometry"], instances.inputs["Points"])

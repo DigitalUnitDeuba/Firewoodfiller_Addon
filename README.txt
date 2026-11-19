@@ -1,4 +1,4 @@
-Firewood Shelf Filler 1.3.1
+Firewood Shelf Filler 1.3.2
 ==========================
 Blender-Erweiterung für statische Holzstapel mit vorgelagerter Physiksimulation.
 Der Paket-Mindeststand ist Blender 4.2, getestet wurde mit Blender 4.3.2.

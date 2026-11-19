@@ -1,4 +1,4 @@
-Firewood Shelf Filler 1.3.0
+Firewood Shelf Filler 1.3.1
 ==========================
 Blender-Erweiterung für statische Holzstapel mit vorgelagerter Physiksimulation.
 Der Paket-Mindeststand ist Blender 4.2, getestet wurde mit Blender 4.3.2.
@@ -15,18 +15,31 @@ Holzstapel erzeugen
 1. Eine Collection mit einzelnen Holzscheit-Meshes als Quelle auswählen.
 2. Einen Würfel für den freien Innenraum auswählen oder erstellen.
    Die lokalen Achsen stehen für Breite (X), Tiefe (Y) und Höhe (Z).
-3. „Füllhöhe im Viewport einstellen“ öffnen. Den türkisfarbenen Griff direkt
+3. Unter „Scheitlänge“ die Regaltiefe als Richtwert verwenden, eine exakte
+   Länge eingeben oder die gemessenen Längen der Quellen übernehmen. Die
+   Scheit-Dicke lässt sich unabhängig davon einstellen.
+4. „Füllhöhe im Viewport einstellen“ öffnen. Den türkisfarbenen Griff direkt
    am Stapel ziehen. Beim Ziehen erscheinen oder verschwinden Holzscheite,
    und die markierte Fläche zeigt die neue Füllgrenze.
-4. Mit dem Häkchen am Griff oder Enter übernehmen. Blender berechnet dann
+5. Mit dem Häkchen am Griff oder Enter übernehmen. Blender berechnet dann
    die Physik und ersetzt den bisherigen Stapel durch das statische Ergebnis.
    Esc verwirft die Vorschau und stellt den bisherigen Stapel wieder her.
 
 Während des Ziehens zeigt Blender die Holzscheite an ihren Startpositionen.
 Die endgültige Verteilung entsteht, wenn die Scheite in der Simulation zur
 Ruhe kommen. Die „Rasterbelegung“ steuert, wie viele Startpositionen innerhalb
-der gewählten Höhe genutzt werden. Wenn kein Scheit hineinpasst, bedeutet
-Übernehmen einen leeren Stapel.
+der gewählten Höhe genutzt werden. Bei automatischer Anzahl und 100 %
+Rasterbelegung füllt Blender nach dem Setzen den freien Platz oberhalb des
+Stapels mit weiteren Scheiten auf. Die automatische Anzahl hat kein festes
+Limit. Wenn kein Scheit hineinpasst, bedeutet Übernehmen einen leeren Stapel.
+
+Der fertige Stapel folgt dem Füllwürfel beim Verschieben, Drehen und
+Skalieren. Nach einer Größenänderung den Stapel neu erzeugen, damit die
+eingegebenen Maße wieder exakt gelten. Zu lange Scheite meldet das Add-on
+vor dem Erzeugen. Die sichtbaren Vorder- und Hinterkanten werden nach der
+Simulation geprüft. Einen Stapel aus Version 1.3.0 einmal neu erzeugen, um ihn an den
+Füllwürfel zu binden. Das Preset „Klein + viele (Physik)“ setzt eine ältere
+gespeicherte Rasterbelegung wieder auf 100 %.
 
 Die Simulation nutzt eine temporäre Szene und vereinfachte Konvexhüllen.
 Modifier auf Quellobjekten vorab auf eine Kopie anwenden, wenn ihre Geometrie

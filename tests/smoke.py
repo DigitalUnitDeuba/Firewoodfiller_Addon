@@ -2,7 +2,7 @@ import runpy
 from pathlib import Path
 
 import bpy
-from mathutils import Vector
+from mathutils import Matrix, Vector
 
 addon = runpy.run_path(str(Path(__file__).resolve().parents[1] / "__init__.py"))
 addon["register"]()
@@ -66,13 +66,79 @@ assert addon["find_stack"](scene, volume) == first
 
 volume.name = "Mein Regal"
 settings.fill_height = 1
+volume.scale.x *= 2
+volume.scale.z *= 2
+bpy.context.view_layer.update()
 assert bpy.ops.fw_shelf.generate() == {'FINISHED'}
 full = addon["find_stack"](scene, volume)
 full_count = len(full.objects)
-assert full_count > half_count, (full_count, half_count)
+assert full_count > 450, full_count
+bpy.context.view_layer.update()
+frame, dims = addon["volume_geometry"](volume)
+inverse = frame.inverted()
+top = max((inverse @ obj.matrix_world @ vertex.co).z
+          for obj in full.objects for vertex in obj.data.vertices)
+reached_height = (top + dims.z / 2) / dims.z
+assert reached_height >= 0.93, reached_height
+
+logs = list(full.objects)[::full_count // 4]
+relative = [volume.matrix_world.inverted() @ obj.matrix_world for obj in logs]
+volume.location += Vector((2, -1, 3))
+volume.rotation_euler.z -= 0.8
+volume.scale.x *= 1.2
+bpy.context.view_layer.update()
+for obj, expected in zip(logs, relative):
+    assert obj.parent == volume
+    actual = volume.matrix_world.inverted() @ obj.matrix_world
+    assert all(abs(actual[row][column] - expected[row][column]) < 0.00001
+               for row in range(4) for column in range(4)), actual
+settings.manual_count = 12
+settings.length_mode = 'FIXED'
+settings.log_length = 0.28
+scene.unit_settings.system = 'METRIC'
+variants = list(source.objects)
+frame, dims = addon["volume_geometry"](volume)
+inverse = frame.inverted()
+setup = addon["prepare_variants"](variants, dims, settings)[0]
+for outside_depth in (-1, 1):
+    matrix = frame @ Matrix.Translation((0, outside_depth * 0.16, 0))
+    offset, local = addon["fit_depth"](matrix, setup, frame, inverse, dims.y)
+    assert offset is not None and offset.translation != matrix.translation
+    depths = [(local @ vertex.co).y for vertex in setup[0].data.vertices]
+    assert min(depths) >= -dims.y / 2 and max(depths) <= dims.y / 2
+    assert abs(max(depths) - min(depths) - settings.log_length) < 0.00001
+
+settings.log_length = 0.5
+try:
+    bpy.ops.fw_shelf.generate()
+except RuntimeError as exc:
+    assert "zu lang" in str(exc) and "Maximal" in str(exc), exc
+else:
+    raise AssertionError("A fixed, excessive length must fail")
+assert addon["find_stack"](scene, volume) == full
+
+for i, obj in enumerate(variants):
+    obj.scale.z = 0.47 + i * 0.06
+settings.log_length = 0.28
+for mode in ('FIXED', 'SOURCE'):
+    settings.length_mode = mode
+    assert bpy.ops.fw_shelf.generate() == {'FINISHED'}
+    stack = addon["find_stack"](scene, volume)
+    bpy.context.view_layer.update()
+    frame, dims = addon["volume_geometry"](volume)
+    inverse = frame.inverted()
+    for obj in stack.objects:
+        local = inverse @ obj.matrix_world
+        assert all(abs((local @ vertex.co).y) <= dims.y * 0.5 for vertex in obj.data.vertices)
+        original = source.objects[obj["firewood_variant"]]
+        local_length = max(v.co.z for v in original.data.vertices) - min(v.co.z for v in original.data.vertices)
+        actual = (obj.matrix_world.to_3x3() @ Vector((0, 0, local_length))).length
+        expected = settings.log_length if mode == 'FIXED' else local_length * original.scale.z
+        assert abs(actual - expected) < 0.00001, (mode, actual, expected)
+
 assert len(set(bpy.data.collections) - before[2]) == 1
 assert bpy.ops.fw_shelf.clear() == {'FINISHED'}
 assert addon["find_stack"](scene, volume) is None
 assert (set(bpy.data.scenes), set(bpy.data.meshes), set(bpy.data.collections)) == before
 addon["unregister"]()
-print(f"PASS: 50% = {half_count} Scheite, 100% = {full_count} Scheite")
+print(f"PASS: 50% = {half_count} Scheite, 100% = {full_count} Scheite (Oberkante bei {reached_height:.1%})")

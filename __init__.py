@@ -2,7 +2,7 @@
 bl_info = {
     "name": "Firewood Shelf Filler",
     "author": "OpenAI",
-    "version": (1, 3, 4),
+    "version": (1, 3, 5),
     "blender": (4, 2, 0),
     "location": "3D Viewport > N > Firewood",
     "description": "Kleinere Holzscheite physikalisch dicht stapeln und als statische Instanzen einfrieren",
@@ -165,7 +165,7 @@ def add_rigidbody(obj, kind, shape):
     return obj.rigid_body
 
 
-def create_walls(temp, frame, dims, meshes):
+def create_walls(temp, frame, dims, meshes, compaction):
     w, d, h = dims
     t = WALL_THICKNESS
     specs = [
@@ -184,7 +184,9 @@ def create_walls(temp, frame, dims, meshes):
         obj = bpy.data.objects.new("__FW_wall_" + label, mesh)
         temp.objects.link(obj)
         obj.matrix_world = frame @ Matrix.Translation(Vector(p))
-        add_rigidbody(obj, 'PASSIVE', 'BOX')
+        body = add_rigidbody(obj, 'PASSIVE', 'BOX')
+        if label != "bottom":
+            body.friction = FRICTION - 0.62 * compaction
         obj.hide_render = True
         obj.display_type = 'WIRE'
 
@@ -493,7 +495,7 @@ def create_proxies(temp, frame, dims, setups, proxies, slots, settings):
         rb.collision_shape = 'CONVEX_HULL'
         rb.use_margin = True
         rb.collision_margin = COLLISION_MARGIN
-        rb.friction = FRICTION
+        rb.friction = FRICTION - 0.50 * settings.compaction
         rb.restitution = 0.0
         rb.mass = max(0.05, (settings.diameter / 0.095)**2)
         rb.linear_damping = 0.30
@@ -507,7 +509,7 @@ def simulate_and_snapshot(scene, bodies, settings, progress=None):
     if world is None:
         raise RuntimeError("Rigid Body World konnte nicht erzeugt werden.")
     world.substeps_per_frame = settings.substeps
-    world.solver_iterations = SIM_SOLVER_ITERATIONS
+    world.solver_iterations = SIM_SOLVER_ITERATIONS + round(12 * settings.compaction)
     world.point_cache.frame_start = 1
     world.point_cache.frame_end = settings.frames
 
@@ -581,20 +583,25 @@ def create_final(scene, volume, snapshots):
     return final
 
 
-def fit_depth(matrix, setup, frame, shelf_inverse, depth):
+def fit_depth(matrix, setup, frame, shelf_inverse, depth, *, front_offset=0.0, alignment=0.0):
     source, transform = setup
     local = shelf_inverse @ matrix @ transform
     limit = depth * 0.5 - COLLISION_MARGIN * 0.25
-    if not source.modifiers and all(abs((local @ Vector(corner)).y) <= limit for corner in source.bound_box):
+    if not alignment and not source.modifiers and all(
+        abs((local @ Vector(corner)).y) <= limit for corner in source.bound_box
+    ):
         return matrix, local
 
-    positions = [(local @ vert.co).y for vert in source.data.vertices]
+    dx, dy, dz, bias = local[1]
+    positions = [dx * vert.co.x + dy * vert.co.y + dz * vert.co.z + bias
+                 for vert in source.data.vertices]
     minimum_y, maximum_y = min(positions), max(positions)
     lower_shift = -limit - minimum_y
     upper_shift = limit - maximum_y
     if lower_shift > upper_shift:
         return None, local
-    shift = min(max(0, lower_shift), upper_shift)
+    front_shift = lower_shift + front_offset
+    shift = min(max(alignment * front_shift, lower_shift), upper_shift)
     adjusted = matrix.copy()
     adjusted.translation += frame.to_3x3() @ Vector((0, shift, 0))
     local.translation.y += shift
@@ -609,6 +616,8 @@ def settle_stack(scene, frame, dims, slots, settings, setups, proxies, progress)
     top = -ceiling
     batch_frame, batch_dims = frame, dims
     top_up = settings.manual_count == 0 and settings.fill >= 1.0
+    rng = random.Random(settings.seed + 3001)
+    front_variation = min(settings.diameter * 0.06, 0.004)
 
     while slots:
         bodies = create_proxies(scene.collection, batch_frame, batch_dims, setups, proxies, slots, settings)
@@ -617,7 +626,11 @@ def settle_stack(scene, frame, dims, slots, settings, setups, proxies, progress)
         new_top = top
         for obj, matrix, setup in settled:
             source, _ = setup
-            matrix, local = fit_depth(matrix, setup, frame, shelf_inverse, dims.y)
+            matrix, local = fit_depth(
+                matrix, setup, frame, shelf_inverse, dims.y,
+                front_offset=COLLISION_MARGIN * 2 + rng.uniform(0.0, front_variation),
+                alignment=settings.front_alignment,
+            )
             if matrix is None or not inside_fill(source, local, dims * 0.5):
                 rejected.append(obj)
                 continue
@@ -673,7 +686,9 @@ def main(context, settings, progress=None):
             try:
                 simulation.frame_end = settings.frames
                 bpy.ops.rigidbody.world_add()
-                create_walls(simulation.collection, frame, dims, meshes)
+                # The slight pull toward the front lets the logs settle against a common face.
+                simulation.gravity += frame.to_3x3() @ Vector((0, -2.75 * settings.front_alignment, 0))
+                create_walls(simulation.collection, frame, dims, meshes, settings.compaction)
                 for index, (source, transform) in enumerate(setups):
                     mesh = create_proxy_mesh(source, transform, index, settings.seed)
                     meshes.append(mesh)
@@ -748,6 +763,16 @@ class FWShelfSettings(bpy.types.PropertyGroup):
     )
     seed: IntProperty(
         name="Zufalls-Seed", default=42, min=0, max=999999,
+    )
+    compaction: FloatProperty(
+        name="Verdichtung",
+        description="Lässt Scheite leichter aneinander und an den Seitenwänden entlanggleiten",
+        default=0.70, min=0.0, max=1.0, subtype='FACTOR',
+    )
+    front_alignment: FloatProperty(
+        name="Frontausrichtung",
+        description="Richtet die vordersten Holzkanten an der Vorderseite des Füllwürfels aus (lokales −Y)",
+        default=0.90, min=0.0, max=1.0, subtype='FACTOR',
     )
     frames: IntProperty(
         name="Simulations-Frames", description="Hoeher = genauer, aber langsamer",
@@ -1341,6 +1366,8 @@ class FWSHELF_PT_panel(bpy.types.Panel):
         if props.stack_mode == 'PHYSICS':
             box = layout.box()
             box.label(text="Physik (nur beim Erzeugen)", icon='PHYSICS')
+            box.prop(props, "compaction", slider=True)
+            box.prop(props, "front_alignment", slider=True)
             box.prop(props, "frames")
             box.prop(props, "substeps")
 

@@ -1,4 +1,4 @@
-Firewood Shelf Filler 1.3.4
+Firewood Shelf Filler 1.3.5
 ==========================
 Blender-Erweiterung für statische Holzstapel mit Produktbild- und Physikmodus.
 Der Paket-Mindeststand ist Blender 4.2. Der Viewport wurde unter Blender
@@ -22,7 +22,10 @@ Holzstapel erzeugen
 4. Als „Stapelstil“ Produktbild oder Physik wählen. Produktbild ist die
    Voreinstellung. Die Scheite liegen in versetzten Reihen, mit parallelen
    Längsachsen und leicht gestaffelten Stirnflächen. Physik lässt die Scheite
-   frei fallen und sich setzen.
+   frei fallen und sich setzen. Über „Verdichtung“ lassen sich Reibung und
+   Solver-Abstimmung anpassen. „Frontausrichtung“ richtet die Stirnkanten
+   an der Vorderseite des Füllwürfels (lokales −Y) aus. Eine leichte
+   Tiefenstaffelung bleibt erhalten.
 5. „Füllhöhe im Viewport einstellen“ öffnen. Den türkisfarbenen Griff direkt
    am Stapel ziehen. Beim Ziehen erscheinen oder verschwinden Holzscheite,
    und die markierte Fläche zeigt die neue Füllgrenze. Über die Regaloberkante
@@ -58,6 +61,7 @@ Entwicklung
 Aus dem Repository-Verzeichnis:
   blender -b --factory-startup --python-exit-code 1 --python tests/smoke.py
   blender -b --factory-startup --python-exit-code 1 --python tests/product_smoke.py
+  blender -b --factory-startup --python-exit-code 1 --python tests/physics_style_smoke.py
   blender -b -c extension validate .
   blender -b -c extension build --source-dir . --output-dir /tmp
 

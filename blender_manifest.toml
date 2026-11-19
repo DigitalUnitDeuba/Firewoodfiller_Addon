@@ -1,8 +1,8 @@
 schema_version = "1.0.0"
 id = "firewood_shelf_filler"
-version = "1.3.2"
+version = "1.3.3"
 name = "Firewood Shelf Filler"
-tagline = "Physically stack small irregular firewood logs inside a shelf"
+tagline = "Arrange firewood for product images or settle it with physics"
 maintainer = "OpenAI"
 type = "add-on"
 tags = ["Object"]

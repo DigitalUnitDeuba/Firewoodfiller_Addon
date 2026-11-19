@@ -2,7 +2,7 @@
 bl_info = {
     "name": "Firewood Shelf Filler",
     "author": "OpenAI",
-    "version": (1, 3, 2),
+    "version": (1, 3, 3),
     "blender": (4, 2, 0),
     "location": "3D Viewport > N > Firewood",
     "description": "Kleinere Holzscheite physikalisch dicht stapeln und als statische Instanzen einfrieren",
@@ -29,12 +29,15 @@ import bpy
 import bmesh
 import math
 import random
+from bisect import bisect_right
+from typing import NamedTuple
 
 import blf
 import gpu
 from gpu_extras.batch import batch_for_shader
 from bpy_extras.view3d_utils import location_3d_to_region_2d
 from mathutils import Matrix, Vector, Euler
+from mathutils.geometry import convex_hull_2d
 from bpy.props import EnumProperty, FloatProperty, IntProperty, PointerProperty
 
 SIM_SOLVER_ITERATIONS = 16
@@ -104,7 +107,7 @@ def check_input(scene, settings):
     variants = source_variants(source)
     if not variants:
         raise RuntimeError("Keine gültigen Holzscheit-Meshes in der Quell-Collection.")
-    frame, dims = fill_geometry(*volume_geometry(volume), settings.fill_height)
+    frame, dims = volume_geometry(volume)
     return variants, frame, dims
 
 def new_collection(name, scene):
@@ -343,6 +346,132 @@ def placements(frame, dims, slots, settings, variant_count):
                         @ Matrix.Scale(scale, 4))
 
 
+class ProductProfile(NamedTuple):
+    variant: int
+    rotation: Matrix
+    x_min: float
+    x_max: float
+    z_min: float
+    z_max: float
+    y_min: float
+    y_max: float
+    lower: list
+    upper: list
+
+
+def product_profiles(setups, rng):
+    profiles = []
+    for variant, (source, transform) in enumerate(setups):
+        silhouette = []
+        y_min, y_max = math.inf, -math.inf
+        for vertex in source.data.vertices:
+            point = transform @ vertex.co
+            silhouette.append(Vector((point.x, point.z)))
+            y_min, y_max = min(y_min, point.y), max(y_max, point.y)
+        hull = [silhouette[i] for i in convex_hull_2d(silhouette)]
+        if len(hull) < 3:
+            continue
+        area = sum(a.x * b.y - a.y * b.x for a, b in zip(hull, hull[1:] + hull[:1]))
+        if area < 0:
+            hull.reverse()
+        for roll in range(8):
+            angle = roll * math.tau / 8 + rng.uniform(-0.12, 0.12)
+            rotation = Matrix.Rotation(angle, 4, 'Y')
+            cos, sin = math.cos(angle), math.sin(angle)
+            corners = [Vector((point.x * cos + point.y * sin, -point.x * sin + point.y * cos))
+                       for point in hull]
+            lower, upper = [], []
+            for a, b in zip(corners, corners[1:] + corners[:1]):
+                if a.x + 1e-8 < b.x:
+                    lower.append((a.x, b.x, a.y, (b.y - a.y) / (b.x - a.x)))
+                elif b.x + 1e-8 < a.x:
+                    upper.append((b.x, a.x, b.y, (a.y - b.y) / (a.x - b.x)))
+            profiles.append(ProductProfile(
+                variant, rotation, min(p.x for p in corners), max(p.x for p in corners),
+                min(p.y for p in corners), max(p.y for p in corners), y_min, y_max,
+                sorted(lower), sorted(upper),
+            ))
+    return profiles
+
+
+def contact_height(lower, upper, offset):
+    """Minimum vertical gap between two convex front silhouettes at this X offset."""
+    separation = None
+    i = j = 0
+    while i < len(lower) and j < len(upper):
+        ax, ax_end, az, a_slope = lower[i]
+        bx, bx_end, bz, b_slope = upper[j]
+        bx += offset
+        bx_end += offset
+        start, end = max(ax, bx), min(ax_end, bx_end)
+        if end > start:
+            x = end if b_slope > a_slope else start
+            diff = bz + (x - bx) * b_slope - az - (x - ax) * a_slope
+            separation = diff if separation is None else max(separation, diff)
+        if ax_end < bx_end:
+            i += 1
+        else:
+            j += 1
+    return separation
+
+
+def product_layout(dims, settings, setups):
+    """Stack supported rows with their long axes parallel to the rack depth."""
+    rng = random.Random(settings.seed)
+    profiles = product_profiles(setups, rng)
+    if not profiles:
+        raise RuntimeError("Die Holzquellen brauchen einen dreidimensionalen Querschnitt.")
+    narrowest = min(profiles, key=lambda profile: profile.x_max - profile.x_min)
+    gap = COLLISION_MARGIN * 0.5
+    left, right = -dims.x * 0.5 + gap, dims.x * 0.5 - gap
+    floor, ceiling = -dims.z * 0.5, dims.z * 0.5
+    result = []
+    obstacles = []
+    columns = {}
+    row = 0
+    while True:
+        row_start = len(result)
+        hit_ceiling = False
+        edge = left + (settings.diameter * 0.38 if row % 2 else 0.0)
+        while edge + narrowest.x_max - narrowest.x_min <= right:
+            profile = rng.choice(profiles)
+            if edge + profile.x_max - profile.x_min > right:
+                profile = narrowest
+            x = edge - profile.x_min
+            end = x + profile.x_max
+            bins = range(math.floor(edge / settings.diameter), math.floor(end / settings.diameter) + 1)
+            edge = end + gap
+            z = floor + gap - profile.z_min
+            required_height = floor
+            supports = False
+            nearby = {index for column in bins for index in columns.get(column, ())}
+            for index in nearby:
+                old_x, old_z, old_profile, old_height = obstacles[index]
+                contact = contact_height(profile.lower, old_profile.upper, old_x - x)
+                if contact is not None:
+                    supports = True
+                    z = max(z, old_z + contact + gap)
+                    required_height = max(required_height, old_height)
+            if row and not supports:
+                continue
+            if z + profile.z_max > ceiling - gap:
+                hit_ceiling = True
+                continue
+            required_height = max(required_height, z + profile.z_max)
+            depth_room = dims.y - (profile.y_max - profile.y_min)
+            front_margin = min(depth_room * 0.5, gap + rng.uniform(0.002, 0.009))
+            y = -dims.y * 0.5 - profile.y_min + front_margin
+            matrix = Matrix.Translation((x, y, z)) @ profile.rotation
+            result.append((required_height, profile.variant, matrix))
+            for column in bins:
+                columns.setdefault(column, []).append(len(obstacles))
+            obstacles.append((x, z, profile, required_height))
+        if hit_ceiling or len(result) == row_start:
+            break
+        row += 1
+    return sorted(result, key=lambda placement: placement[0])
+
+
 def create_proxies(temp, frame, dims, setups, proxies, slots, settings):
     log(f"{len(setups)} Varianten, {len(slots)} Startpositionen.")
 
@@ -526,10 +655,21 @@ def main(context, settings, progress=None):
     scene = context.scene
     context.view_layer.update()
     variants, frame, dims = check_input(scene, settings)
+    setups = prepare_variants(variants, dims, settings)
+    if settings.stack_mode == 'PRODUCT':
+        ceiling = dims.z * (settings.fill_height - 0.5)
+        layout = product_layout(dims, settings, setups)
+        capacity = bisect_right(layout, ceiling, key=lambda placement: placement[0])
+        count = planned_count(settings, capacity)
+        if not count:
+            raise RuntimeError("Die Füllhöhe oder Regalbreite reicht für die eingestellte Scheit-Dicke nicht aus.")
+        stack = [(frame @ matrix, setups[variant]) for _, variant, matrix in layout[:count]]
+        return create_final(scene, settings.volume_object, stack), 0
+
+    frame, dims = fill_geometry(frame, dims, settings.fill_height)
     slots = create_slots(dims, settings)
     if not slots:
         raise RuntimeError("Die Füllhöhe oder Regalbreite reicht für die eingestellte Scheit-Dicke nicht aus.")
-    setups = prepare_variants(variants, dims, settings)
     meshes = []
     proxies = []
     simulation = bpy.data.scenes.new("Firewood Physics")
@@ -570,8 +710,16 @@ class FWShelfSettings(bpy.types.PropertyGroup):
         name="Regal-Innenraum", type=bpy.types.Object,
         description="Cube, der den freien Platz im Regal ausfuellt (X=Breite, Y=Tiefe, Z=Hoehe)",
     )
+    stack_mode: EnumProperty(
+        name="Stapelstil",
+        items=(
+            ('PRODUCT', "Produktbild", "Versetzte Reihen mit parallel ausgerichteten Scheiten"),
+            ('PHYSICS', "Physik", "Scheite frei fallen und sich auf natürliche Weise setzen lassen"),
+        ),
+        default='PRODUCT',
+    )
     fill: FloatProperty(
-        name="Rasterbelegung", description="Anteil der Startpositionen innerhalb der gewählten Füllhöhe",
+        name="Rasterbelegung", description="Anteil der verfügbaren Positionen innerhalb der gewählten Füllhöhe",
         default=1.0, min=0.10, max=1.0, subtype='FACTOR',
     )
     fill_height: FloatProperty(
@@ -625,6 +773,7 @@ class FWSHELF_OT_small_preset(bpy.types.Operator):
     def execute(self, context):
         p = context.scene.fw_shelf_settings
         p.manual_count = 0
+        p.stack_mode = 'PHYSICS'
         p.diameter = 0.055
         p.fill = 1.0
         p.frames = 220
@@ -710,8 +859,6 @@ def create_preview_nodes(setups):
     try:
         tree.interface.new_socket(name="Geometry", in_out='INPUT', socket_type='NodeSocketGeometry')
         tree.interface.new_socket(name="Geometry", in_out='OUTPUT', socket_type='NodeSocketGeometry')
-        count = tree.interface.new_socket(name="Scheite", in_out='INPUT', socket_type='NodeSocketInt')
-        count.min_value = 0
         nodes = tree.nodes
         link = tree.links.new
         inputs = nodes.new('NodeGroupInput')
@@ -723,7 +870,8 @@ def create_preview_nodes(setups):
         # Older releases also expose sockets for the inactive comparison types.
         operands = {socket.name: socket for socket in selection.inputs if socket.enabled}
         link(index.outputs[0], operands["A"])
-        link(inputs.outputs["Scheite"], operands["B"])
+        count_socket = operands["B"]
+        count_socket.default_value = 0
 
         instances = nodes.new('GeometryNodeInstanceOnPoints')
         link(inputs.outputs["Geometry"], instances.inputs["Points"])
@@ -755,7 +903,7 @@ def create_preview_nodes(setups):
             attribute.inputs["Name"].default_value = attribute_name
             link(attribute.outputs["Attribute"], instances.inputs[input_name])
         link(instances.outputs["Instances"], output.inputs["Geometry"])
-        return tree, count.identifier
+        return tree, count_socket
     except Exception:
         bpy.data.node_groups.remove(tree)
         raise
@@ -818,6 +966,7 @@ class FWSHELF_OT_adjust_height(bpy.types.Operator):
         self.preview = None
         self.preview_mesh = None
         self.preview_tree = None
+        self.product_heights = None
         self.preview_sources = []
         self.draw_handler = None
         self.previous_layer = None
@@ -879,8 +1028,14 @@ class FWSHELF_OT_adjust_height(bpy.types.Operator):
 
     def build_preview(self):
         positions, variants, rotations, scales = [], [], [], []
-        slots = create_slots(self.dims, self.settings)
-        for variant, matrix in placements(Matrix.Identity(4), self.dims, slots, self.settings, len(self.setups)):
+        if self.settings.stack_mode == 'PRODUCT':
+            layout = product_layout(self.dims, self.settings, self.setups)
+            self.product_heights = [height for height, _, _ in layout]
+            poses = ((variant, matrix) for _, variant, matrix in layout)
+        else:
+            slots = create_slots(self.dims, self.settings)
+            poses = placements(Matrix.Identity(4), self.dims, slots, self.settings, len(self.setups))
+        for variant, matrix in poses:
             translation, rotation, scale = matrix.decompose()
             positions.append(translation)
             variants.append(variant)
@@ -904,7 +1059,7 @@ class FWSHELF_OT_adjust_height(bpy.types.Operator):
                 copy_log_appearance(source, raw_source)
                 source = raw_source
             node_setups.append((source, transform))
-        self.preview_tree, self.count_input = create_preview_nodes(node_setups)
+        self.preview_tree, self.count_socket = create_preview_nodes(node_setups)
         self.preview = bpy.data.objects.new("Firewood Live-Vorschau", self.preview_mesh)
         self.scene.collection.objects.link(self.preview)
         self.preview.hide_select = True
@@ -912,17 +1067,21 @@ class FWSHELF_OT_adjust_height(bpy.types.Operator):
         self.preview.parent = self.volume
         self.preview.matrix_parent_inverse = self.volume.matrix_world.inverted()
         self.preview.matrix_basis = self.frame
-        self.modifier = self.preview.modifiers.new("Scheite nach Füllhöhe", 'NODES')
-        self.modifier.node_group = self.preview_tree
+        modifier = self.preview.modifiers.new("Scheite nach Füllhöhe", 'NODES')
+        modifier.node_group = self.preview_tree
 
     def update_preview(self):
-        _, dims = fill_geometry(self.frame, self.dims, self.height)
-        count = planned_count(self.settings, slot_grid(dims, self.settings.diameter)[-1])
+        if self.product_heights is not None:
+            capacity = bisect_right(self.product_heights, self.dims.z * (self.height - 0.5))
+        else:
+            _, dims = fill_geometry(self.frame, self.dims, self.height)
+            capacity = slot_grid(dims, self.settings.diameter)[-1]
+        count = planned_count(self.settings, capacity)
         if count == self.count:
             return
         self.count = count
         if self.preview is not None:
-            self.modifier[self.count_input] = count
+            self.count_socket.default_value = count
             self.preview.update_tag()
 
     def apply_height(self):
@@ -1135,7 +1294,9 @@ class FWSHELF_PT_panel(bpy.types.Panel):
         layout.separator()
         col = layout.column(align=True)
         col.label(text="2. Stapel einstellen", icon='MOD_ARRAY')
-        col.operator("fw_shelf.small_preset", icon='PHYSICS', text="Kleine Scheite + viele (Preset)")
+        col.prop(props, "stack_mode")
+        if props.stack_mode == 'PHYSICS':
+            col.operator("fw_shelf.small_preset", icon='PHYSICS', text="Kleine Scheite + viele (Preset)")
         col.prop(props, "manual_count")
         row = col.row()
         row.enabled = props.manual_count == 0
@@ -1144,7 +1305,7 @@ class FWSHELF_PT_panel(bpy.types.Panel):
         col.prop(props, "fill_height", slider=True)
         col.operator("fw_shelf.adjust_height", icon='VIEW3D')
         vol = props.volume_object
-        if vol is not None and vol.type == 'MESH':
+        if props.stack_mode == 'PHYSICS' and vol is not None and vol.type == 'MESH':
             try:
                 _, dims = fill_geometry(*volume_geometry(vol), props.fill_height)
             except RuntimeError as exc:
@@ -1159,17 +1320,18 @@ class FWSHELF_PT_panel(bpy.types.Panel):
             col.prop(props, "log_length")
         col.prop(props, "seed")
 
-        box = layout.box()
-        box.label(text="Physik (nur beim Erzeugen)", icon='PHYSICS')
-        box.prop(props, "frames")
-        box.prop(props, "substeps")
+        if props.stack_mode == 'PHYSICS':
+            box = layout.box()
+            box.label(text="Physik (nur beim Erzeugen)", icon='PHYSICS')
+            box.prop(props, "frames")
+            box.prop(props, "substeps")
 
         layout.separator()
         col = layout.column(align=True)
         col.scale_y = 1.5
         col.operator("fw_shelf.generate", icon='PLAY', text="3. Holzstapel erzeugen")
         layout.operator("fw_shelf.clear", icon='TRASH', text="Generierten Stapel loeschen")
-        layout.label(text="Nach Simulation: statische Objekte")
+        layout.label(text="Ergebnis: statische Objekte")
         layout.label(text="Mesh-Daten geteilt; keine Dauerphysik")
 
 

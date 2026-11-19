@@ -1,7 +1,8 @@
-Firewood Shelf Filler 1.3.2
+Firewood Shelf Filler 1.3.3
 ==========================
-Blender-Erweiterung für statische Holzstapel mit vorgelagerter Physiksimulation.
-Der Paket-Mindeststand ist Blender 4.2, getestet wurde mit Blender 4.3.2.
+Blender-Erweiterung für statische Holzstapel mit Produktbild- und Physikmodus.
+Der Paket-Mindeststand ist Blender 4.2. Der Viewport wurde unter Blender
+4.3.2 geprüft, der Geometrie- und Vorschauaufbau zusätzlich mit Blender 5.3.0.
 
 Installation
 ------------
@@ -18,20 +19,23 @@ Holzstapel erzeugen
 3. Unter „Scheitlänge“ die Regaltiefe als Richtwert verwenden, eine exakte
    Länge eingeben oder die gemessenen Längen der Quellen übernehmen. Die
    Scheit-Dicke lässt sich unabhängig davon einstellen.
-4. „Füllhöhe im Viewport einstellen“ öffnen. Den türkisfarbenen Griff direkt
+4. Als „Stapelstil“ Produktbild oder Physik wählen. Produktbild ist die
+   Voreinstellung. Die Scheite liegen in versetzten Reihen, mit parallelen
+   Längsachsen und leicht gestaffelten Stirnflächen. Physik lässt die Scheite
+   frei fallen und sich setzen.
+5. „Füllhöhe im Viewport einstellen“ öffnen. Den türkisfarbenen Griff direkt
    am Stapel ziehen. Beim Ziehen erscheinen oder verschwinden Holzscheite,
    und die markierte Fläche zeigt die neue Füllgrenze.
-5. Mit dem Häkchen am Griff oder Enter übernehmen. Blender berechnet dann
-   die Physik und ersetzt den bisherigen Stapel durch das statische Ergebnis.
+6. Mit dem Häkchen am Griff oder Enter übernehmen. Bei „Produktbild“ wird
+   die gezeigte Anordnung übernommen, im Physikmodus folgt die Simulation.
    Esc verwirft die Vorschau und stellt den bisherigen Stapel wieder her.
 
-Während des Ziehens zeigt Blender die Holzscheite an ihren Startpositionen.
-Die endgültige Verteilung entsteht, wenn die Scheite in der Simulation zur
-Ruhe kommen. Die „Rasterbelegung“ steuert, wie viele Startpositionen innerhalb
-der gewählten Höhe genutzt werden. Bei automatischer Anzahl und 100 %
-Rasterbelegung füllt Blender nach dem Setzen den freien Platz oberhalb des
-Stapels mit weiteren Scheiten auf. Die automatische Anzahl hat kein festes
-Limit. Wenn kein Scheit hineinpasst, bedeutet Übernehmen einen leeren Stapel.
+Die „Rasterbelegung“ steuert, wie viele Positionen innerhalb der gewählten
+Höhe genutzt werden. Im Physikmodus zeigt die Vorschau die Startpositionen.
+Bei automatischer Anzahl und 100 % Rasterbelegung füllt dieser Modus nach
+dem Setzen den freien Platz oberhalb des Stapels auf. Die automatische Anzahl
+hat kein festes Limit. Wenn kein Scheit hineinpasst, übernimmt der Regler
+einen leeren Stapel.
 
 Der fertige Stapel folgt dem Füllwürfel beim Verschieben, Drehen und
 Skalieren. Nach einer Größenänderung den Stapel neu erzeugen, damit die
@@ -51,6 +55,7 @@ Entwicklung
 -----------
 Aus dem Repository-Verzeichnis:
   blender -b --factory-startup --python-exit-code 1 --python tests/smoke.py
+  blender -b --factory-startup --python-exit-code 1 --python tests/product_smoke.py
   blender -b -c extension validate .
   blender -b -c extension build --source-dir . --output-dir /tmp
 

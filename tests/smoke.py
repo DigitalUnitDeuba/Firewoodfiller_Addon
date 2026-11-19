@@ -8,6 +8,7 @@ addon = runpy.run_path(str(Path(__file__).resolve().parents[1] / "__init__.py"))
 addon["register"]()
 scene = bpy.context.scene
 settings = scene.fw_shelf_settings
+settings.stack_mode = "PHYSICS"
 assert settings.fill_height == 1.0
 assert bpy.ops.fw_shelf.make_volume() == {'FINISHED'}
 volume = settings.volume_object

@@ -2,7 +2,7 @@
 bl_info = {
     "name": "Firewood Shelf Filler",
     "author": "OpenAI",
-    "version": (1, 3, 6),
+    "version": (1, 3, 7),
     "blender": (4, 2, 0),
     "location": "3D Viewport > N > Firewood",
     "description": "Kleinere Holzscheite physikalisch dicht stapeln und als statische Instanzen einfrieren",
@@ -264,6 +264,10 @@ def create_proxy_mesh(source, transform, index, seed, guided=False):
     return mesh
 
 
+def packing_diameter(settings):
+    return settings.diameter * max(settings.section_scale_x, settings.section_scale_z)
+
+
 def slot_grid(dims, diameter):
     # Allow for the largest variant, its roll, and Bullet's collision margin.
     pitch = diameter * 1.04 * DIAMETER_VARIATION[1] + 2 * COLLISION_MARGIN
@@ -284,7 +288,7 @@ def planned_count(settings, capacity):
 
 
 def create_slots(dims, settings):
-    pitch, row_pitch, inset, even, odd, capacity = slot_grid(dims, settings.diameter)
+    pitch, row_pitch, inset, even, odd, capacity = slot_grid(dims, packing_diameter(settings))
     amount = planned_count(settings, capacity)
     # Keep the lower rows filled. Only sample positions in the last partial row.
     slots = []
@@ -335,7 +339,8 @@ def prepare_variants(variants, dims, settings):
                     amount = bpy.utils.units.to_string(units.system, 'LENGTH',
                                                        max_length * units.scale_length, precision=3)
                 raise RuntimeError(f"'{source.name}' ist zu lang für das Fach. Maximal passen {amount}.")
-        setups.append((source, normalize_variant(source, bounds, length, diameter)))
+        section = Matrix.Diagonal((settings.section_scale_x, 1, settings.section_scale_z, 1))
+        setups.append((source, section @ normalize_variant(source, bounds, length, diameter)))
     return setups
 
 
@@ -369,6 +374,24 @@ class ProductProfile(NamedTuple):
     upper: list
 
 
+def ordered_outline(points):
+    outline = [points[i] for i in convex_hull_2d(points)]
+    area = sum(a.x * b.y - a.y * b.x for a, b in zip(outline, outline[1:] + outline[:1]))
+    if area < 0:
+        outline.reverse()
+    return outline
+
+
+def profile_edges(outline):
+    lower, upper = [], []
+    for a, b in zip(outline, outline[1:] + outline[:1]):
+        if a.x + 1e-8 < b.x:
+            lower.append((a.x, b.x, a.y, (b.y - a.y) / (b.x - a.x)))
+        elif b.x + 1e-8 < a.x:
+            upper.append((b.x, a.x, b.y, (a.y - b.y) / (a.x - b.x)))
+    return sorted(lower), sorted(upper)
+
+
 def product_profiles(setups, rng):
     profiles = []
     for variant, (source, transform) in enumerate(setups):
@@ -378,28 +401,20 @@ def product_profiles(setups, rng):
             point = transform @ vertex.co
             silhouette.append(Vector((point.x, point.z)))
             y_min, y_max = min(y_min, point.y), max(y_max, point.y)
-        hull = [silhouette[i] for i in convex_hull_2d(silhouette)]
+        hull = ordered_outline(silhouette)
         if len(hull) < 3:
             continue
-        area = sum(a.x * b.y - a.y * b.x for a, b in zip(hull, hull[1:] + hull[:1]))
-        if area < 0:
-            hull.reverse()
         for roll in range(8):
             angle = roll * math.tau / 8 + rng.uniform(-0.12, 0.12)
             rotation = Matrix.Rotation(angle, 4, 'Y')
             cos, sin = math.cos(angle), math.sin(angle)
             corners = [Vector((point.x * cos + point.y * sin, -point.x * sin + point.y * cos))
                        for point in hull]
-            lower, upper = [], []
-            for a, b in zip(corners, corners[1:] + corners[:1]):
-                if a.x + 1e-8 < b.x:
-                    lower.append((a.x, b.x, a.y, (b.y - a.y) / (b.x - a.x)))
-                elif b.x + 1e-8 < a.x:
-                    upper.append((b.x, a.x, b.y, (a.y - b.y) / (a.x - b.x)))
+            lower, upper = profile_edges(corners)
             profiles.append(ProductProfile(
                 variant, rotation, min(p.x for p in corners), max(p.x for p in corners),
                 min(p.y for p in corners), max(p.y for p in corners), y_min, y_max,
-                sorted(lower), sorted(upper),
+                lower, upper,
             ))
     return profiles
 
@@ -432,6 +447,7 @@ def product_layout(dims, settings, setups):
     if not profiles:
         raise RuntimeError("Die Holzquellen brauchen einen dreidimensionalen Querschnitt.")
     narrowest = min(profiles, key=lambda profile: profile.x_max - profile.x_min)
+    diameter = packing_diameter(settings)
     gap = COLLISION_MARGIN * 0.5
     left, right = -dims.x * 0.5 + gap, dims.x * 0.5 - gap
     floor, ceiling = -dims.z * 0.5, dims.z * 0.5
@@ -441,14 +457,14 @@ def product_layout(dims, settings, setups):
     row = 0
     while True:
         row_start = len(result)
-        edge = left + (settings.diameter * 0.38 if row % 2 else 0.0)
+        edge = left + (diameter * 0.38 if row % 2 else 0.0)
         while edge + narrowest.x_max - narrowest.x_min <= right:
             profile = rng.choice(profiles)
             if edge + profile.x_max - profile.x_min > right:
                 profile = narrowest
             x = edge - profile.x_min
             end = x + profile.x_max
-            bins = range(math.floor(edge / settings.diameter), math.floor(end / settings.diameter) + 1)
+            bins = range(math.floor(edge / diameter), math.floor(end / diameter) + 1)
             edge = end + gap
             z = floor + gap - profile.z_min
             required_height = floor
@@ -477,6 +493,93 @@ def product_layout(dims, settings, setups):
             break
         row += 1
     return sorted(result, key=lambda placement: placement[0])
+
+
+def front_alignment_strength(settings):
+    alignment = settings.front_alignment
+    # Guided hulls settle centered in depth, including when the visible log is short.
+    return alignment * (2 - alignment) if settings.longitudinal_guide else alignment
+
+
+def fill_physics_gaps(frame, dims, settings, setups, stack):
+    """Add supported, thinner pieces below existing logs using front silhouettes."""
+    rng = random.Random(settings.seed + 4103)
+    diameter = packing_diameter(settings)
+    alignment = front_alignment_strength(settings)
+    gap = COLLISION_MARGIN * 0.5
+    left, right = -dims.x * 0.5 + gap, dims.x * 0.5 - gap
+    floor, ceiling = -dims.z * 0.5 + gap, dims.z * 0.5 - gap
+    columns = {}
+    obstacles = []
+
+    def register(x, z, outline, lower, upper):
+        if not lower or not upper:
+            return
+        first = math.floor((x + min(p.x for p in outline)) / diameter)
+        last = math.floor((x + max(p.x for p in outline)) / diameter)
+        for column in range(first, last + 1):
+            columns.setdefault(column, []).append(len(obstacles))
+        obstacles.append((x, z, lower, upper))
+
+    inverse = frame.inverted()
+    for matrix, (source, transform) in stack:
+        local = inverse @ matrix @ transform
+        x, _, z = local.translation
+        projection = []
+        for vertex in source.data.vertices:
+            point = local @ vertex.co
+            projection.append(Vector((point.x - x, point.z - z)))
+        outline = ordered_outline(projection)
+        register(x, z, outline, *profile_edges(outline))
+
+    original_count = len(obstacles)
+    additions = []
+    for size in (0.78, 0.60, 0.44):
+        thinner = [(source, Matrix.Diagonal((size, 1, size, 1)) @ transform)
+                   for source, transform in setups]
+        profiles = product_profiles(thinner, rng)
+        if not profiles:
+            continue
+        step = diameter * size * 0.35
+        for column in range(math.ceil((right - left) / step)):
+            profile = rng.choice(profiles)
+            x = left + column * step - profile.x_min
+            if x + profile.x_max > right:
+                continue
+            first = math.floor((x + profile.x_min) / diameter)
+            last = math.floor((x + profile.x_max) / diameter)
+            nearby = {index for k in range(first, last + 1) for index in columns.get(k, ())}
+
+            intervals = []
+            for index in nearby:
+                ox, oz, lower, upper = obstacles[index]
+                above = contact_height(profile.lower, upper, ox - x)
+                below = contact_height(lower, profile.upper, x - ox)
+                if above is not None and below is not None:
+                    covers_center = ox + lower[0][0] <= x <= ox + lower[-1][1]
+                    capped_gap = covers_center and index < original_count
+                    intervals.append((oz - below - gap, oz + above + gap, covers_center, capped_gap))
+            candidate = floor - profile.z_min
+            supported = True
+            for lower_edge, upper_edge, covers_center, capped_gap in sorted(intervals):
+                if candidate + profile.z_max > ceiling:
+                    break
+                if supported and capped_gap and candidate <= lower_edge:
+                    depth_room = dims.y - (profile.y_max - profile.y_min)
+                    margin = min(depth_room * 0.5, gap + rng.uniform(0.002, 0.006))
+                    front = -dims.y * 0.5 - profile.y_min + margin
+                    y = front * alignment
+                    matrix = frame @ Matrix.Translation((x, y, candidate)) @ profile.rotation
+                    additions.append((matrix, thinner[profile.variant]))
+                    # The new piece can support subsequent columns but never fills an open top.
+                    for k in range(first, last + 1):
+                        columns.setdefault(k, []).append(len(obstacles))
+                    obstacles.append((x, candidate, profile.lower, profile.upper))
+                    candidate += profile.z_max - profile.z_min + gap
+                if upper_edge > candidate:
+                    candidate = upper_edge
+                    supported = covers_center
+    return additions
 
 
 def create_proxies(temp, frame, dims, setups, proxies, slots, settings):
@@ -637,10 +740,7 @@ def settle_stack(scene, frame, dims, slots, settings, setups, proxies, progress)
     top_up = settings.manual_count == 0 and settings.fill >= 1.0
     rng = random.Random(settings.seed + 3001)
     front_variation = min(settings.diameter * 0.06, 0.004)
-    alignment = settings.front_alignment
-    if settings.longitudinal_guide:
-        # Guided hulls settle centered in depth, including when the visible log is short.
-        alignment *= 2 - alignment
+    alignment = front_alignment_strength(settings)
 
     while slots:
         bodies = create_proxies(scene.collection, batch_frame, batch_dims, setups, proxies, slots, settings)
@@ -737,6 +837,10 @@ def main(context, settings, progress=None):
 
     if not valid:
         raise RuntimeError("Kein Scheit blieb im Füllbereich. Prüfe Füllhöhe, Dicke und Simulationsdauer.")
+    if settings.fill_gaps and not settings.manual_count:
+        additions = fill_physics_gaps(frame, dims, settings, setups, valid)
+        log(f"{len(additions)} schmalere Scheite in Zwischenräumen ergänzt.")
+        valid.extend(additions)
     return create_final(scene, settings.volume_object, valid), discarded
 
 class FWShelfSettings(bpy.types.PropertyGroup):
@@ -772,6 +876,14 @@ class FWShelfSettings(bpy.types.PropertyGroup):
         name="Scheit-Dicke", description="Maximaler Querschnittsdurchmesser bei fester Länge oder Quellmaß",
         default=0.055, min=0.015, max=1.0, precision=3, subtype='DISTANCE',
     )
+    section_scale_x: FloatProperty(
+        name="Breite (X)", description="Breite des ausgerichteten Scheits vor seiner Drehung",
+        default=0.9, min=0.25, max=1.0, subtype='FACTOR',
+    )
+    section_scale_z: FloatProperty(
+        name="Höhe (Z)", description="Höhe des ausgerichteten Scheits vor seiner Drehung",
+        default=0.9, min=0.25, max=1.0, subtype='FACTOR',
+    )
     length_mode: EnumProperty(
         name="Scheitlänge",
         items=(
@@ -796,6 +908,11 @@ class FWShelfSettings(bpy.types.PropertyGroup):
         name="Verdichtung",
         description="Lässt Scheite leichter aneinander und an den Seitenwänden entlanggleiten",
         default=0.70, min=0.0, max=1.0, subtype='FACTOR',
+    )
+    fill_gaps: BoolProperty(
+        name="Zwischenräume füllen",
+        description="Setzt bei automatischer Anzahl schmalere Scheite in Lücken ein",
+        default=True,
     )
     longitudinal_guide: BoolProperty(
         name="Längsführung",
@@ -1152,7 +1269,7 @@ class FWSHELF_OT_adjust_height(bpy.types.Operator):
             capacity = bisect_right(self.product_heights, self.dims.z * (self.height - 0.5))
         else:
             _, dims = fill_geometry(self.frame, self.dims, self.height)
-            capacity = slot_grid(dims, self.settings.diameter)[-1]
+            capacity = slot_grid(dims, packing_diameter(self.settings))[-1]
         count = planned_count(self.settings, capacity)
         if count == self.count:
             return
@@ -1378,6 +1495,9 @@ class FWSHELF_PT_panel(bpy.types.Panel):
         row.enabled = props.manual_count == 0
         row.prop(props, "fill", slider=True)
         col.prop(props, "diameter")
+        row = col.row(align=True)
+        row.prop(props, "section_scale_x", slider=True)
+        row.prop(props, "section_scale_z", slider=True)
         col.prop(props, "fill_height")
         col.operator("fw_shelf.adjust_height", icon='VIEW3D')
         vol = props.volume_object
@@ -1387,7 +1507,7 @@ class FWSHELF_PT_panel(bpy.types.Panel):
             except RuntimeError as exc:
                 col.label(text=str(exc), icon='ERROR')
             else:
-                capacity = slot_grid(dims, props.diameter)[-1]
+                capacity = slot_grid(dims, packing_diameter(props))[-1]
                 col.label(text=f"Startpositionen: {planned_count(props, capacity)}", icon='INFO')
         col.prop(props, "length_mode")
         if props.length_mode == 'AUTO':
@@ -1400,6 +1520,9 @@ class FWSHELF_PT_panel(bpy.types.Panel):
             box = layout.box()
             box.label(text="Physik (nur beim Erzeugen)", icon='PHYSICS')
             box.prop(props, "longitudinal_guide")
+            row = box.row()
+            row.enabled = props.manual_count == 0
+            row.prop(props, "fill_gaps")
             box.prop(props, "compaction", slider=True)
             box.prop(props, "front_alignment", slider=True)
             box.prop(props, "frames")

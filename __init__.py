@@ -2,7 +2,7 @@
 bl_info = {
     "name": "Firewood Shelf Filler",
     "author": "OpenAI",
-    "version": (1, 3, 5),
+    "version": (1, 3, 6),
     "blender": (4, 2, 0),
     "location": "3D Viewport > N > Firewood",
     "description": "Kleinere Holzscheite physikalisch dicht stapeln und als statische Instanzen einfrieren",
@@ -38,7 +38,7 @@ from gpu_extras.batch import batch_for_shader
 from bpy_extras.view3d_utils import location_3d_to_region_2d
 from mathutils import Matrix, Vector, Euler
 from mathutils.geometry import convex_hull_2d
-from bpy.props import EnumProperty, FloatProperty, IntProperty, PointerProperty
+from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, PointerProperty
 
 SIM_SOLVER_ITERATIONS = 16
 COLLISION_MARGIN = 0.0008
@@ -215,7 +215,7 @@ def normalize_variant(source, bounds, target_length, target_diameter):
     align = direction.rotation_difference(Vector((0, 1, 0))).to_matrix()
     return align.to_4x4() @ Matrix.Diagonal((*factors, 1.0)) @ Matrix.Translation(-center)
 
-def create_proxy_mesh(source, transform, index, seed):
+def create_proxy_mesh(source, transform, index, seed, guided=False):
     # Erzeuge pro Quellmesh nur EINE vereinfachte Konvexhuelle.
     # Alle simulierten Kopien verweisen auf diese Proxy-Mesh-Daten.
     vertices = source.data.vertices
@@ -228,6 +228,14 @@ def create_proxy_mesh(source, transform, index, seed):
         chosen.add(max(range(n), key=lambda k: vertices[k].co[axis]))
 
     points = [transform @ vertices[k].co for k in sorted(chosen)]
+    if guided:
+        section = [Vector((point.x, point.z)) for point in points]
+        outline = [section[i] for i in convex_hull_2d(section)]
+        if len(outline) >= 3:
+            points = [Vector((point.x, y, point.y)) for point in outline for y in (-0.5, 0.5)]
+        else:
+            # Degenerate sections still need a full-depth collision guide.
+            return make_box_mesh(f"__FW_GuideBox_{index:03d}", (0.005, 1.0, 0.005))
     mesh = bpy.data.meshes.new("__FW_ConvexHull_%03d" % index)
     bm = bmesh.new()
     try:
@@ -475,15 +483,25 @@ def create_proxies(temp, frame, dims, setups, proxies, slots, settings):
     log(f"{len(setups)} Varianten, {len(slots)} Startpositionen.")
 
     bodies = []
+    shelf_inverse = frame.inverted()
     for i, (variant, matrix) in enumerate(placements(frame, dims, slots, settings, len(setups))):
         obj = bpy.data.objects.new(f"__FW_log_{i:04d}", proxies[variant])
         temp.objects.link(obj)
+        depth_scale = 1.0
+        if settings.longitudinal_guide:
+            # A full-depth collision hull limits sideways rotation inside the rack.
+            # The visible log keeps its original length and roll.
+            local = shelf_inverse @ matrix
+            local.translation.y = 0.0
+            clearance = 2 * COLLISION_MARGIN
+            depth_scale = (dims.y - clearance) / local.to_scale().y
+            matrix = frame @ local @ Matrix.Diagonal((1, depth_scale, 1, 1))
         obj.matrix_world = matrix
         obj.hide_render = True
         obj.display_type = 'WIRE'
-        bodies.append((obj, setups[variant]))
+        bodies.append((obj, setups[variant], depth_scale))
 
-    objects = [obj for obj, _ in bodies]
+    objects = [obj for obj, _, _ in bodies]
     with bpy.context.temp_override(selected_objects=objects, selected_editable_objects=objects):
         status = bpy.ops.rigidbody.objects_add(type='ACTIVE')
     if status != {'FINISHED'}:
@@ -523,9 +541,10 @@ def simulate_and_snapshot(scene, bodies, settings, progress=None):
             log(f"Physik: Frame {frame_number}/{settings.frames}")
     depsgraph = bpy.context.evaluated_depsgraph_get()
     snapshots = []
-    for obj, setup in bodies:
+    for obj, setup, depth_scale in bodies:
         evaluated = obj.evaluated_get(depsgraph)
-        snapshots.append((obj, evaluated.matrix_world.copy(), setup))
+        visible = evaluated.matrix_world @ Matrix.Diagonal((1, 1 / depth_scale, 1, 1))
+        snapshots.append((obj, visible, setup, depth_scale))
     return snapshots
 
 
@@ -618,28 +637,32 @@ def settle_stack(scene, frame, dims, slots, settings, setups, proxies, progress)
     top_up = settings.manual_count == 0 and settings.fill >= 1.0
     rng = random.Random(settings.seed + 3001)
     front_variation = min(settings.diameter * 0.06, 0.004)
+    alignment = settings.front_alignment
+    if settings.longitudinal_guide:
+        # Guided hulls settle centered in depth, including when the visible log is short.
+        alignment *= 2 - alignment
 
     while slots:
         bodies = create_proxies(scene.collection, batch_frame, batch_dims, setups, proxies, slots, settings)
         settled = simulate_and_snapshot(scene, bodies, settings, progress=progress)
         current, rejected = [], []
         new_top = top
-        for obj, matrix, setup in settled:
+        for obj, matrix, setup, depth_scale in settled:
             source, _ = setup
             matrix, local = fit_depth(
                 matrix, setup, frame, shelf_inverse, dims.y,
                 front_offset=COLLISION_MARGIN * 2 + rng.uniform(0.0, front_variation),
-                alignment=settings.front_alignment,
+                alignment=alignment,
             )
             if matrix is None or not inside_fill(source, local, dims * 0.5):
                 rejected.append(obj)
                 continue
-            current.append((obj, matrix, setup))
+            current.append((obj, matrix, setup, depth_scale))
             if top_up:
                 # The exact shape matters here. A rotated bounding box can overstate the fill height.
                 if source.modifiers or max((local @ Vector(corner)).z for corner in source.bound_box) > new_top:
                     new_top = max(new_top, max((local @ vert.co).z for vert in source.data.vertices))
-        accepted.extend((matrix, setup) for _, matrix, setup in current)
+        accepted.extend((matrix, setup) for _, matrix, setup, _ in current)
         discarded += len(rejected)
         if not top_up or new_top - top < settings.diameter * 0.1:
             break
@@ -654,9 +677,14 @@ def settle_stack(scene, frame, dims, slots, settings, setups, proxies, progress)
         scene.frame_set(1)
         for obj in rejected:
             bpy.data.objects.remove(obj, do_unlink=True)
-        for obj, matrix, _ in current:
+        for obj, matrix, _, depth_scale in current:
             obj.rigid_body.type = 'PASSIVE'
-            obj.matrix_world = matrix
+            if settings.longitudinal_guide:
+                # Keep the extended hull in the rack's center when it becomes a support.
+                local = shelf_inverse @ matrix
+                local.translation.y = 0.0
+                matrix = frame @ local
+            obj.matrix_world = matrix @ Matrix.Diagonal((1, depth_scale, 1, 1))
 
     return accepted, discarded
 
@@ -690,7 +718,7 @@ def main(context, settings, progress=None):
                 simulation.gravity += frame.to_3x3() @ Vector((0, -2.75 * settings.front_alignment, 0))
                 create_walls(simulation.collection, frame, dims, meshes, settings.compaction)
                 for index, (source, transform) in enumerate(setups):
-                    mesh = create_proxy_mesh(source, transform, index, settings.seed)
+                    mesh = create_proxy_mesh(source, transform, index, settings.seed, settings.longitudinal_guide)
                     meshes.append(mesh)
                     proxies.append(mesh)
                 valid, discarded = settle_stack(simulation, frame, dims, slots, settings, setups, proxies, progress)
@@ -768,6 +796,11 @@ class FWShelfSettings(bpy.types.PropertyGroup):
         name="Verdichtung",
         description="Lässt Scheite leichter aneinander und an den Seitenwänden entlanggleiten",
         default=0.70, min=0.0, max=1.0, subtype='FACTOR',
+    )
+    longitudinal_guide: BoolProperty(
+        name="Längsführung",
+        description="Hält die Scheite beim Setzen längs zur Regaltiefe",
+        default=True,
     )
     front_alignment: FloatProperty(
         name="Frontausrichtung",
@@ -1366,6 +1399,7 @@ class FWSHELF_PT_panel(bpy.types.Panel):
         if props.stack_mode == 'PHYSICS':
             box = layout.box()
             box.label(text="Physik (nur beim Erzeugen)", icon='PHYSICS')
+            box.prop(props, "longitudinal_guide")
             box.prop(props, "compaction", slider=True)
             box.prop(props, "front_alignment", slider=True)
             box.prop(props, "frames")

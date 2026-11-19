@@ -1,8 +1,10 @@
 import runpy
 from pathlib import Path
 from statistics import mean, pstdev
+from math import cos, radians
 
 import bpy
+from mathutils import Vector
 
 addon = runpy.run_path(str(Path(__file__).resolve().parents[1] / "__init__.py"))
 addon["register"]()
@@ -47,6 +49,7 @@ def measure(compaction, alignment):
 
 
 compaction, alignment = settings.compaction, settings.front_alignment
+settings.longitudinal_guide = False
 natural = measure(0.0, 0.0)
 uncompacted = measure(0.0, alignment)
 aligned = measure(compaction, alignment)
@@ -55,3 +58,18 @@ assert aligned[1] < natural[1] * 0.5, (natural, aligned)
 assert aligned[2] < uncompacted[2], (uncompacted, aligned)
 print(f"PHYSICS STYLE PASS: front spacing {natural[0]:.4f} -> {aligned[0]:.4f}, "
       f"mean log height {uncompacted[2]:.4f} -> {aligned[2]:.4f}")
+
+volume.scale.y = 0.68
+settings.length_mode = 'FIXED'
+settings.log_length = 0.25
+loose = measure(compaction, alignment)
+settings.longitudinal_guide = True
+guided = measure(compaction, alignment)
+stack = addon["find_stack"](scene, volume)
+frame, _ = addon["volume_geometry"](volume)
+inverse = frame.inverted()
+axes = [(inverse @ obj.matrix_world).to_3x3() @ Vector((0, 0, 0.32)) for obj in stack.objects]
+assert all(abs(axis.normalized().y) > cos(radians(8)) for axis in axes)
+assert all(abs(axis.length - settings.log_length) < 0.00001 for axis in axes)
+assert guided[1] < loose[1] * 0.5, (loose, guided)
+print(f"GUIDANCE PASS: minimum depth-axis alignment {min(abs(axis.normalized().y) for axis in axes):.4f}")
